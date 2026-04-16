@@ -6,7 +6,8 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$0")"
+PROJECT_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 WORKSPACE="$PROJECT_ROOT/workspace"
 LOGS="$PROJECT_ROOT/logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -26,6 +27,11 @@ ${BOLD}amadeus${NC} — multi-agent task orchestrator
 ${BOLD}USAGE${NC}
   amadeus <task-type> <prompt> [options]
 
+${BOLD}CHAINING${NC}
+  amadeus architecture "Design API" | amadeus snippet "Generate endpoints from this"
+
+  When piped, the upstream output is appended to the prompt as context.
+
 ${BOLD}TASK TYPES${NC}
   ${CYAN}architecture${NC}  → Claude Code  │ System design, API design, data modeling
   ${CYAN}debug${NC}         → Claude Code  │ Bug investigation, error tracing, fixes
@@ -42,6 +48,7 @@ ${BOLD}EXAMPLES${NC}
   amadeus debug "Fix the null pointer in src/auth/login.ts"
   amadeus boilerplate "Create a CRUD controller for the User model"
   amadeus snippet "Write a debounce utility function in TypeScript"
+  amadeus architecture "Design auth" | amadeus snippet "Generate FastAPI from this"
 
 EOF
   exit 0
@@ -53,10 +60,10 @@ log() {
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] [$level] $msg" >> "$LOGS/amadeus_${TIMESTAMP}.log"
   if [[ "$QUIET" != "true" ]]; then
     case "$level" in
-      INFO)  echo -e "${GREEN}[INFO]${NC}  $msg" ;;
-      ROUTE) echo -e "${CYAN}[ROUTE]${NC} $msg" ;;
-      DONE)  echo -e "${GREEN}[DONE]${NC}  $msg" ;;
-      ERROR) echo -e "${RED}[ERROR]${NC} $msg" ;;
+      INFO)  echo -e "${GREEN}[INFO]${NC}  $msg" >&2 ;;
+      ROUTE) echo -e "${CYAN}[ROUTE]${NC} $msg" >&2 ;;
+      DONE)  echo -e "${GREEN}[DONE]${NC}  $msg" >&2 ;;
+      ERROR) echo -e "${RED}[ERROR]${NC} $msg" >&2 ;;
     esac
   fi
 }
@@ -116,13 +123,26 @@ while [[ $# -gt 0 ]]; do
     -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
     -q|--quiet)  QUIET="true"; shift ;;
     -h|--help)   usage ;;
-    *) echo -e "${RED}Unknown option: $1${NC}"; usage ;;
+    *) echo -e "${RED}Unknown option: $1${NC}" >&2; usage ;;
   esac
 done
 
 if [[ -z "$TASK_TYPE" || -z "$PROMPT" ]]; then
-  echo -e "${RED}Error: task-type and prompt are required${NC}"
+  echo -e "${RED}Error: task-type and prompt are required${NC}" >&2
   usage
+fi
+
+# ── Read stdin if piped (chaining support) ─────────────
+STDIN_CONTEXT=""
+if [[ ! -t 0 ]]; then
+  STDIN_CONTEXT=$(cat)
+  if [[ -n "$STDIN_CONTEXT" ]]; then
+    log INFO "Received piped context ($(echo "$STDIN_CONTEXT" | wc -c | tr -d ' ') bytes)"
+    PROMPT="$PROMPT
+
+--- Context from previous task ---
+$STDIN_CONTEXT"
+  fi
 fi
 
 # ── Route and execute ──────────────────────────────────
@@ -130,30 +150,30 @@ AGENT=$(route_task "$TASK_TYPE")
 OUTDIR=$(output_dir "$TASK_TYPE")
 
 if [[ "$AGENT" == "unknown" ]]; then
-  echo -e "${RED}Unknown task type: $TASK_TYPE${NC}"
-  echo "Valid types: architecture, debug, boilerplate, snippet"
+  echo -e "${RED}Unknown task type: $TASK_TYPE${NC}" >&2
+  echo "Valid types: architecture, debug, boilerplate, snippet" >&2
   exit 1
 fi
 
-# Determine output file
+# Determine output file — use only the user prompt (not piped context) for the filename
 if [[ -n "$OUTPUT_FILE" ]]; then
   OUTPATH="$WORKSPACE/$OUTPUT_FILE"
   mkdir -p "$(dirname "$OUTPATH")"
 else
-  SAFE_NAME=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | cut -c1-50)
+  SAFE_NAME=$(echo "${2:-$PROMPT}" | head -1 | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | cut -c1-50)
   OUTPATH="$OUTDIR/${TIMESTAMP}_${SAFE_NAME}.md"
 fi
 
 log INFO "Task type:  $TASK_TYPE"
 log INFO "Agent:      $AGENT"
 log INFO "Output:     $OUTPATH"
-log INFO "Prompt:     $PROMPT"
-echo ""
+log INFO "Prompt:     $(echo "$PROMPT" | head -1)"
+echo "" >&2
 
 case "$AGENT" in
   claude) run_claude "$PROMPT" "$OUTPATH" ;;
   codex)  run_codex "$PROMPT" "$OUTPATH" ;;
 esac
 
-echo ""
+echo "" >&2
 log DONE "Output saved to $OUTPATH"
