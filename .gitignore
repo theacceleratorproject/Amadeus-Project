@@ -1,0 +1,15 @@
+# Agent output (large/generated files)
+workspace/architecture/*.md
+workspace/debug/*.md
+workspace/boilerplate/*.md
+workspace/snippets/*.md
+
+# Logs
+logs/*.log
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.*
